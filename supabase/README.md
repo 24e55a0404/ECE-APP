@@ -1,29 +1,35 @@
 # Connect ECE Nexus to Supabase
 
-The site uses Supabase Auth for email/password accounts and PostgreSQL row-level security for private student submissions, faculty inboxes, and project messages.
+The portal uses Supabase Auth for email/password login and PostgreSQL row-level security for student submissions, faculty inboxes, and project messages. New student and faculty accounts enter an administrator approval queue.
 
 ## Set up the database
 
 1. Open the ECE Nexus project in the Supabase Dashboard.
-2. Open **SQL Editor**, choose **New query**, and paste the complete contents of `setup.sql`.
-3. Select **Run** once. The script creates the profile, submission, and message tables, enables row-level security, and installs policies that limit each account to its own records and project participants.
-4. In **Authentication → URL Configuration**, set the Site URL and add this Redirect URL:
+2. Open **SQL Editor**, choose **New query**, paste all of `setup.sql`, and click **Run** once.
+3. In **Authentication → URL Configuration**, set the Site URL and add this Redirect URL:
 
    `https://24e55a0404.github.io/ECE-APP/`
 
-5. In **Authentication → Providers**, leave **Email** enabled. Student registrations create student accounts; the user confirms their email before signing in.
+4. In **Authentication → Providers**, keep **Email** enabled. People must use an email they can access and confirm that email before approval.
 
-## Enable faculty accounts
+## Create the first department administrator
 
-Faculty can choose **Faculty → Request faculty account access** on the portal and register their official email. New accounts are intentionally created as students until the department promotes them. After the faculty member confirms their email, run a query like this in SQL Editor, replacing the email and domain:
+The administrator is the only account that can approve student and faculty requests. First create a normal account using the portal, then confirm that account's email. In SQL Editor, replace the address below with the department administrator's confirmed email and run both statements:
 
 ```sql
 update public.profiles
-set role = 'faculty', faculty_domain = 'VLSI Design'
-where email = 'faculty.name@college.edu';
+set role = 'admin', approval_status = 'approved'
+where email = 'admin@college.edu';
+
+update public.access_requests
+set status = 'approved', reviewed_at = now()
+where user_id = (select id from public.profiles where email = 'admin@college.edu');
 ```
 
-The faculty member can then choose **Faculty** and sign in. The role choice on the login page never grants faculty access by itself.
+Then return to the portal, choose **Department administrator? Log in**, and use that account's own email and password. The new **Access requests** page lists requests with each person's name, email, role, and faculty domain. Select **Approve** or **Reject**. Approved users can log in with the same email and password they registered; they do not receive or share credentials with the administrator.
 
-The project uses the public **Publishable key** in the browser. Never put a Supabase **Secret** or legacy `service_role` key in this repository. The submission conversation is stored in the portal inbox; automatic email alerts to faculty require a separate mail provider and server-side function.
+## Student and faculty access
 
+On the portal, choose **Student** or **Faculty**, select the account request link, enter a name, email, and password, then submit the request. Faculty also choose their domain. They confirm their email and wait for department approval. Selecting Faculty at login does not grant faculty permissions by itself.
+
+The project uses the public **Publishable key** in browser code. Never put a Supabase **Secret** or legacy `service_role` key in this repository. Project communication appears in the portal inbox; automatic external email alerts require a separate mail provider and server-side function.
