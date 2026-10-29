@@ -142,7 +142,7 @@ begin
       or new.created_at is distinct from old.created_at then
       raise exception 'Faculty can update project status, guide assignment, and deadline only.';
     end if;
-  elsif viewer_role <> 'admin' then
+  elsif viewer_role is distinct from 'admin' then
     raise exception 'An active student or faculty account is required.';
   end if;
   new.updated_at := now();
@@ -301,3 +301,89 @@ revoke all on function public.guard_ece_message_participants() from public, anon
 -- update public.profiles set role = 'faculty', faculty_domain = 'Embedded Systems'
 -- where email = 'faculty.name@college.edu';
 
+-- Approval workflow: students and faculty can register, but neither can use the portal
+-- until a department administrator reviews their request.
+alter table public.profiles add column if not exists approval_status text not null default 'pending'
+  check (approval_status in ('pending', 'approved', 'rejected'));
+
+create table if not exists public.access_requests (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null unique references public.profiles(id) on delete cascade,
+  requested_role text not null check (requested_role in ('student', 'faculty')),
+  faculty_domain text,
+  request_details text not null default '',
+  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+  created_at timestamptz not null default now(),
+  reviewed_at timestamptz,
+  reviewed_by uuid references public.profiles(id)
+);
+insert into public.access_requests (user_id, requested_role, faculty_domain, request_details)
+select id, case when role = 'faculty' then 'faculty' else 'student' end, faculty_domain, 'Existing account; review access'
+from public.profiles where role in ('student', 'faculty')
+on conflict (user_id) do nothing;
+alter table public.access_requests enable row level security;
+
+create or replace function public.handle_new_ece_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare requested text := case when new.raw_user_meta_data ->> 'requested_role' = 'faculty' then 'faculty' else 'student' end;
+begin
+  insert into public.profiles (id, email, display_name, role, faculty_domain, approval_status)
+  values (new.id, new.email,
+    coalesce(nullif(new.raw_user_meta_data ->> 'display_name', ''), split_part(new.email, '@', 1)),
+    'student', nullif(new.raw_user_meta_data ->> 'faculty_domain', ''), 'pending')
+  on conflict (id) do nothing;
+  insert into public.access_requests (user_id, requested_role, faculty_domain, request_details)
+  values (new.id, requested, nullif(new.raw_user_meta_data ->> 'faculty_domain', ''),
+    coalesce(new.raw_user_meta_data ->> 'request_details', ''))
+  on conflict (user_id) do nothing;
+  return new;
+end;
+$$;
+
+-- Existing profiles remain pending until explicitly approved below. The first admin
+-- must be bootstrapped once in SQL Editor with their own verified account email.
+create or replace function public.current_ece_role()
+returns text language sql stable security definer set search_path = public as $$
+  select case when approval_status = 'approved' then role else null end
+  from public.profiles where id = auth.uid()
+$$;
+
+create or replace function public.review_ece_access_request(request_uuid uuid, decision text)
+returns void language plpgsql security definer set search_path = public as $$
+declare req public.access_requests%rowtype;
+begin
+  if public.current_ece_role() is distinct from 'admin' then raise exception 'Department administrator access is required.'; end if;
+  if decision not in ('approved', 'rejected') then raise exception 'Decision must be approved or rejected.'; end if;
+  select * into req from public.access_requests where id = request_uuid for update;
+  if not found then raise exception 'Access request not found.'; end if;
+  update public.access_requests set status = decision, reviewed_at = now(), reviewed_by = auth.uid() where id = request_uuid;
+  update public.profiles set
+    approval_status = decision,
+    role = case when decision = 'approved' then req.requested_role else 'student' end,
+    faculty_domain = case when decision = 'approved' and req.requested_role = 'faculty' then req.faculty_domain else null end
+  where id = req.user_id;
+end;
+$$;
+revoke all on function public.review_ece_access_request(uuid, text) from public, anon;
+grant execute on function public.review_ece_access_request(uuid, text) to authenticated;
+grant select on public.access_requests to authenticated;
+drop policy if exists "access_request_self_or_admin_read" on public.access_requests;
+create policy "access_request_self_or_admin_read" on public.access_requests for select to authenticated
+  using (user_id = auth.uid() or public.current_ece_role() = 'admin');
+
+drop policy if exists "profiles_read_self_faculty_and_project_contacts" on public.profiles;
+create policy "profiles_read_self_faculty_and_project_contacts" on public.profiles for select to authenticated
+  using (
+    id = auth.uid()
+    or (role = 'faculty' and approval_status = 'approved')
+    or public.current_ece_role() = 'admin'
+    or (approval_status = 'approved' and exists (
+      select 1 from public.project_submissions s where s.student_id = profiles.id
+        and (s.assigned_faculty_id = auth.uid() or s.faculty_pref_1 = auth.uid() or s.faculty_pref_2 = auth.uid() or s.faculty_pref_3 = auth.uid())
+    ))
+  );
+
+-- One-time bootstrap after a department admin has created and verified an account:
+-- update public.profiles set role='admin', approval_status='approved' where email='admin@college.edu';
+-- update public.access_requests set status='approved', reviewed_at=now() where user_id=(select id from public.profiles where email='admin@college.edu');
+-- This does not expose admin registration on the public portal.
