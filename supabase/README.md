@@ -12,6 +12,12 @@ The portal uses Supabase Auth for email/password login and PostgreSQL row-level 
 
 4. In **Authentication → Providers**, keep **Email** enabled. People must use an email they can access and confirm that email before approval.
 
+## Email delivery
+
+The confirmation email goes to the address entered on the signup form. Supabase's default sender is for testing and only delivers to authorized project-team addresses. To deliver confirmations to students' and faculty members' addresses, configure a custom SMTP provider in **Authentication → SMTP Settings** before signup, then use **Resend confirmation email** on the portal if needed. Keep SMTP credentials in Supabase settings; never put them in this repository or browser code.
+
+The portal does not email the administrator when an access request is created. The administrator reviews requests in **Access requests** after logging in. Sending separate admin or faculty notifications requires an email provider and a server-side function.
+
 ## Create the first department administrator
 
 The administrator is the only account that can approve student and faculty requests. First create a normal account using the portal, then confirm that account's email. In SQL Editor, replace the address below with the department administrator's confirmed email and run both statements:
